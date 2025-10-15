@@ -1,0 +1,29 @@
+{
+  "name": "pumpfun-pumpswap-sdk",
+  "version": "1.0.0",
+  "description": "Node.js SDK for buying and selling tokens on Pump.fun and PumpSwap with automatic bonding curve switching",
+  "main": "src/buy.js",
+  "scripts": {
+    "test:buy": "node src/instructions/testBuy.js",
+    "test:sell": "node src/instructions/testSell.js"
+  },
+  "keywords": [
+    "solana",
+    "pump-fun",
+    "pumpswap",
+    "crypto-trading",
+    "blockchain"
+  ],
+  "author": "Erbsensuppee",
+  "license": "MIT",
+  "dependencies": {
+    "@solana/spl-token": "^0.4.8",
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/pumpfun-pumpswap-sdk.git"
+  }
+}
