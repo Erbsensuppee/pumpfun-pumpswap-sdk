@@ -295,7 +295,7 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
       { pubkey: creatorVault, isSigner: false, isWritable: true },
       { pubkey: eventAuthority, isSigner: false, isWritable: false },
       { pubkey: PUMPFUN_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true },
+      { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: false }, // IDL: writable=false
       { pubkey: userVolumeAccumulator, isSigner: false, isWritable: true },
       { pubkey: feeConfig, isSigner: false, isWritable: false },
       { pubkey: FEE_PROGRAM_ID, isSigner: false, isWritable: false },

@@ -30,7 +30,7 @@ const { buildPumpFunBuy } = require("../buy.js");
         const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
         console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
         // --- Token to buy
-        const mint = new PublicKey("BZm5a6GoqGAhEYgSAPjHhPmu8Z38ijnfp1XCBSMNpump");
+        const mint = new PublicKey("B7BaJd1kZwL26CPvAtqJ6tmQzsq9FVdrgaNG581spump");
 
         const solToBuy = 0.01; // Adjust based on decimals (1e6 = 1 token if 6 decimals)
         const lamportsToBuy = solToBuy * LAMPORTS_PER_SOL;
