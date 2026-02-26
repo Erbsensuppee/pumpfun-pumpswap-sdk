@@ -69,7 +69,7 @@ function parseGlobalFeeRecipient(globalAccountData) {
 async function performSell(connection, mintAddress, userPubkey, payerKeypair, percent, slippage = 0.10) {
   console.log(
     '[performSell types]',
-    typeof lamportsToBuy,
+    typeof tokenLamportAmountToSell,
     typeof slippage
   );
 
@@ -239,6 +239,15 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
     PUMPFUN_PROGRAM_ID
   );
 
+  // --- Cashback: userVolumeAccumulator for Pump program (remaining_accounts[0] on sell) ---
+  const [userVolumeAccumulator] = PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("user_volume_accumulator"),
+      userPubkey.toBuffer()
+    ],
+    PUMPFUN_PROGRAM_ID
+  );
+
   // --- Compute SOL output from bonding curve formula ---
   const k = virtualTokenReserves * virtualSolReserves;
   const newTokenReserves = virtualTokenReserves + tokenLamports;
@@ -273,6 +282,8 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
       { pubkey: PUMPFUN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: feeConfig, isSigner: false, isWritable: false },
       { pubkey: FEE_PROGRAM_ID, isSigner: false, isWritable: false },
+      // remaining_accounts[0]: userVolumeAccumulator for Pump program (cashback on sell)
+      { pubkey: userVolumeAccumulator, isSigner: false, isWritable: true },
     ],
     data,
   });
@@ -413,7 +424,7 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
       TOKEN_PROGRAM_ID.toBuffer(),
       quoteMint.toBuffer(),
     ],
-    TOKEN_2022_PROGRAM_ID
+    ASSOCIATED_TOKEN_PROGRAM_ID  // Matches buy.js; TOKEN_2022_PROGRAM_ID was wrong here
   );
   //console.log("[SELL] Creator Vault Auth:", coinCreatorVaultAuthority.toBase58());
   //console.log("[SELL] Creator Vault ATA:", coinCreatorVaultAta.toBase58());  // Verify on Solscan
@@ -436,6 +447,19 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
       Buffer.from("__event_authority")
     ],
      PUMP_SWAP_PROGRAM_ID);
+
+  // --- Cashback remaining accounts for PumpSwap sell ---
+  // remaining_accounts[0]: WSOL ATA of userVolumeAccumulator for AMM program
+  // remaining_accounts[1]: userVolumeAccumulator for AMM program
+  const [userVolumeAccumulatorAmm] = PublicKey.findProgramAddressSync(
+    [Buffer.from("user_volume_accumulator"), userPubkey.toBuffer()],
+    PUMP_SWAP_PROGRAM_ID
+  );
+  const cashbackUserVolumeAccumulatorWsolAta = await getAssociatedTokenAddress(
+    quoteMint,
+    userVolumeAccumulatorAmm,
+    true // allowOwnerOffCurve
+  );
 
   // --- Fetch reserves & calculate ---
   const baseBalResp = await connection.getTokenAccountBalance(poolBaseTokenAccount);
@@ -485,7 +509,11 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
       { pubkey: coinCreatorVaultAta, isSigner: false, isWritable: true },  // coin_creator_vault_ata
       { pubkey: coinCreatorVaultAuthority, isSigner: false, isWritable: false },  // coin_creator_vault_authority
       { pubkey: feeConfig, isSigner: false, isWritable: false },  // fee_config
-      { pubkey: FEE_PROGRAM_ID, isSigner: false, isWritable: false }  // fee_program
+      { pubkey: FEE_PROGRAM_ID, isSigner: false, isWritable: false },  // fee_program
+      // remaining_accounts[0]: WSOL ATA of userVolumeAccumulator for AMM program (cashback)
+      { pubkey: cashbackUserVolumeAccumulatorWsolAta, isSigner: false, isWritable: true },
+      // remaining_accounts[1]: userVolumeAccumulator for AMM program (cashback)
+      { pubkey: userVolumeAccumulatorAmm, isSigner: false, isWritable: true },
     ],
     data
   });

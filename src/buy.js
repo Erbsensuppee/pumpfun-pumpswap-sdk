@@ -468,6 +468,14 @@ async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, sl
     PUMP_SWAP_PROGRAM_ID
   );
 
+  // --- Cashback: WSOL ATA of userVolumeAccumulator for the AMM program (remaining_accounts[0]) ---
+  // Per cashback readme: PumpSwap buy expects WSOL ATA of UserVolumeAccumulator (AMM program) at remaining_accounts[0]
+  const cashbackUserVolumeAccumulatorWsolAta = await getAssociatedTokenAddress(
+    quoteMint,           // WSOL mint
+    userVolumeAccumulator, // owner = userVolumeAccumulator PDA
+    true                 // allowOwnerOffCurve = true (PDA owner)
+  );
+
   const EVENT_AUTHORITY_SEED = Buffer.from("__event_authority");
   const [eventAuthority] = PublicKey.findProgramAddressSync([EVENT_AUTHORITY_SEED], PUMP_SWAP_PROGRAM_ID);
 
@@ -577,7 +585,9 @@ async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, sl
       { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true },  // global_volume_accumulator
       { pubkey: userVolumeAccumulator, isSigner: false, isWritable: true },  // user_volume_accumulator
       { pubkey: feeConfig, isSigner: false, isWritable: false },  // fee_config
-      { pubkey: FEE_PROGRAM_ID, isSigner: false, isWritable: false }  // fee_program
+      { pubkey: FEE_PROGRAM_ID, isSigner: false, isWritable: false },  // fee_program
+      // remaining_accounts[0]: WSOL ATA of userVolumeAccumulator for AMM program (cashback)
+      { pubkey: cashbackUserVolumeAccumulatorWsolAta, isSigner: false, isWritable: true },
     ],
     data
   });
