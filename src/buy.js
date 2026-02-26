@@ -44,6 +44,15 @@ const FEE_SEED_CONST = new Uint8Array([
   245, 210, 255, 59, 101, 93, 43, 182, 253, 109, 24, 176,
 ]);
 
+function parseGlobalFeeRecipient(globalAccountData) {
+  // Anchor discriminator (8) + initialized (1) + authority (32) = 41
+  const feeRecipientOffset = 8 + 1 + 32;
+  if (!globalAccountData || globalAccountData.length < feeRecipientOffset + 32) {
+    throw new Error("Invalid Global account data for fee_recipient");
+  }
+  return new PublicKey(globalAccountData.slice(feeRecipientOffset, feeRecipientOffset + 32));
+}
+
 /**
  * Performs a buy with retries (up to 2 retries on failure).
  * Calls buildPumpFunBuy and sends the transaction.
@@ -221,7 +230,11 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
     FEE_PROGRAM_ID
   );
 
-  const feeRecipient = new PublicKey("CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM");
+  const globalAccountInfo = await connection.getAccountInfo(global);
+  if (!globalAccountInfo?.data) {
+    throw new Error("Failed to fetch Global account data");
+  }
+  const feeRecipient = parseGlobalFeeRecipient(globalAccountInfo.data);
   // --- Ensure the user has an associated token account (ATA) ---
   const associatedUser = await getOrCreateAssociatedTokenAccount(
     connection,
