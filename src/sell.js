@@ -369,7 +369,7 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
   );
   const cashbackUserVolumeAccumulatorWsolAta = isCashbackCoin
     ? await getAssociatedTokenAddress(
-        quoteMint, userVolumeAccumulatorAmm, true, TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+        quoteMint, userVolumeAccumulatorAmm, true, QUOTE_TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
       )
     : null;
 
