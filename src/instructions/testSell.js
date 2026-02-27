@@ -1,9 +1,12 @@
 const fs = require('fs');
 const path = require('path');
 const dotenv = require('dotenv');
-dotenv.config({ path: __dirname + '/.env' });
+// Prefer repo root .env, fallback to local instructions/.env if present
+dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const bs58 = require("bs58");
+const bs58Decode = bs58.decode || (bs58.default && bs58.default.decode);
 const {
   Connection,
   Transaction,
@@ -33,7 +36,10 @@ dotenv.config();
 
     // --- Setup connection and wallet
     const connection = new Connection(heliusUrl, "confirmed");
-    const wallet = Keypair.fromSecretKey(bs58.decode(privateKeyBase58));
+    if (!bs58Decode) {
+      throw new Error("bs58.decode not available; check bs58 version/import");
+    }
+    const wallet = Keypair.fromSecretKey(bs58Decode(privateKeyBase58));
     console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
 
     // --- Token + amount setup
