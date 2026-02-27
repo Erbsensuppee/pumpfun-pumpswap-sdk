@@ -16,7 +16,7 @@ const {
 } = require("@solana/web3.js");
 const { 
     getAssociatedTokenAddress, 
-    getAccount 
+    TOKEN_2022_PROGRAM_ID,
 } = require("@solana/spl-token");
 
 // Your custom sell function (must export buildSellTransaction)
@@ -43,24 +43,38 @@ dotenv.config();
     console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
 
     // --- Token + amount setup
-    const tokenMint = new PublicKey("BZm5a6GoqGAhEYgSAPjHhPmu8Z38ijnfp1XCBSMNpump"); // replace this
-    // Find your associated token account (ATA)
-    const userTokenATA = await getAssociatedTokenAddress(tokenMint, wallet.publicKey);
+    const tokenMint = new PublicKey("CzMcB9NPLh7cWNncHnwawacogB78s5DGUiCZubx3pump"); // replace this
+    const mintInfo = await connection.getAccountInfo(tokenMint, "confirmed");
+    if (!mintInfo?.owner) {
+      throw new Error(`Mint account not found: ${tokenMint.toBase58()}`);
+    }
+    const tokenProgramId = mintInfo.owner;
+    const isToken2022 = tokenProgramId.equals(TOKEN_2022_PROGRAM_ID);
+    console.log(`Token program: ${tokenProgramId.toBase58()}${isToken2022 ? " (Token-2022)" : ""}`);
+
+    // Find your associated token account (ATA), respecting token program
+    const userTokenATA = await getAssociatedTokenAddress(
+      tokenMint,
+      wallet.publicKey,
+      false,
+      tokenProgramId,
+    );
 
     const parsedInfo = await connection.getParsedAccountInfo(userTokenATA, "confirmed");
 
     const tokenLamportsToSell = BigInt(parsedInfo.value?.data?.parsed?.info?.tokenAmount?.amount || 0);
 
-    // Get the token account info
-    
-
     console.log(
       `Preparing to sell ${tokenLamportsToSell} lamports of ${tokenMint.toBase58()}`
     );
+    if (tokenLamportsToSell <= 0n) {
+      console.log("No token balance to sell. Aborting without sending transaction.");
+      return;
+    }
     const closeTokenAta = true;
     // --- Build the sell transaction
 
-    const sellTxInstruction = await buildPumpFunSell(
+    const { instructions } = await buildPumpFunSell(
         connection,           // Connection
         tokenMint,            // PublicKey
         wallet.publicKey,     // user's public key
@@ -69,7 +83,7 @@ dotenv.config();
     );
 
     // --- Wrap instructions in a Transaction
-    const tx = new Transaction().add(...sellTxInstruction);
+    const tx = new Transaction().add(...instructions);
 
     // --- Send and confirm transaction
     try {

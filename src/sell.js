@@ -36,6 +36,10 @@ const SELL_DISCRIMINATOR = Buffer.from([51, 230, 133, 164, 1, 127, 131, 173]);
 // PUMPSWAP
 const PUMP_SWAP_PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 const WSOL_MINT            = new PublicKey('So11111111111111111111111111111111111111112');
+const V2_ACCOUNT_MODE_RAW = (process.env.PUMP_INCLUDE_V2_ACCOUNTS || "true").toLowerCase();
+const V2_ACCOUNT_MODE =
+  V2_ACCOUNT_MODE_RAW === "false" ? "off" :
+  "on";
 
 const FEE_SEED_CONST = new Uint8Array([
   1, 86, 224, 246, 147, 102, 90, 207, 68, 219,
@@ -93,6 +97,11 @@ function parseGlobalFeeRecipient(globalAccountData) {
   return new PublicKey(globalAccountData.slice(offset, offset + 32));
 }
 
+async function shouldIncludeV2Account(connection, pda) {
+  if (V2_ACCOUNT_MODE === "off") return false;
+  return true;
+}
+
 async function getTokenProgramId(connection, mint) {
   const info = await connection.getAccountInfo(mint);
   if (!info?.owner) throw new Error("Mint account not found");
@@ -147,6 +156,8 @@ async function getBondingCurveReserves(connection, bondingCurve) {
     tokenTotalSupply:       d.readBigUInt64LE(40),
     bondingCurveIsComplete: d[48] === 1,
     creatorPublicKey:       new PublicKey(d.slice(49, 81)),
+    isMayhemMode:           d.length > 81 ? d[81] === 1 : false,
+    isCashbackCoin:         d.length > 82 ? d[82] === 1 : false,
   };
 }
 
@@ -160,7 +171,7 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
   const [bondingCurve] = PublicKey.findProgramAddressSync(
     [Buffer.from("bonding-curve"), mint.toBuffer()], PUMPFUN_PROGRAM_ID
   );
-  const { virtualTokenReserves, virtualSolReserves, bondingCurveIsComplete, creatorPublicKey } =
+  const { virtualTokenReserves, virtualSolReserves, bondingCurveIsComplete, creatorPublicKey, isCashbackCoin } =
     await getBondingCurveReserves(connection, bondingCurve);
 
   switch (Number(bondingCurveIsComplete)) {
@@ -169,7 +180,7 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
       break;
     case PumpProgramType.PUMP_SWAP:
       console.log("[SELL] Bonding curve complete → redirecting to PumpSwap sell path");
-      return await buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, closeTokenAta, slippage, creatorPublicKey);
+      return await buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, closeTokenAta, slippage, creatorPublicKey, true, isCashbackCoin);
     default:
       console.warn("[SELL] Unknown PumpProgramType, aborting sell");
       return;
@@ -180,6 +191,8 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
   const [eventAuthority] = PublicKey.findProgramAddressSync([Buffer.from("__event_authority")], PUMPFUN_PROGRAM_ID);
   const [feeConfig]      = PublicKey.findProgramAddressSync([Buffer.from("fee_config"), FEE_SEED_CONST], FEE_PROGRAM_ID);
   const [creatorVault]   = PublicKey.findProgramAddressSync([Buffer.from("creator-vault"), creatorPublicKey.toBuffer()], PUMPFUN_PROGRAM_ID);
+  const bondingCurveV2   = derivePumpFunBondingCurveV2PDA(mint);
+  const includeBondingCurveV2 = await shouldIncludeV2Account(connection, bondingCurveV2);
 
   // Cashback: userVolumeAccumulator for Pump program (remaining_accounts[0])
   const [userVolumeAccumulator] = PublicKey.findProgramAddressSync(
@@ -197,7 +210,13 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
   if (!globalAccountInfo?.data) throw new Error("Failed to fetch Global account data");
   const feeRecipient = parseGlobalFeeRecipient(globalAccountInfo.data);
 
-  const associatedUser = await getAssociatedTokenAddress(mint, userPubkey);
+  const associatedUser = await getAssociatedTokenAddress(
+    mint,
+    userPubkey,
+    false,
+    tokenProgramId,
+    ASSOCIATED_TOKEN_PROGRAM_ID
+  );
 
   // --- SOL output quote using bonding curve constant-product ---
   const k = virtualTokenReserves * virtualSolReserves;
@@ -232,7 +251,8 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
       { pubkey: feeConfig,               isSigner: false, isWritable: false },
       { pubkey: FEE_PROGRAM_ID,          isSigner: false, isWritable: false },
       // remaining_accounts[0]: userVolumeAccumulator for Pump program (cashback)
-      { pubkey: userVolumeAccumulator,   isSigner: false, isWritable: true  },
+      ...(isCashbackCoin ? [{ pubkey: userVolumeAccumulator, isSigner: false, isWritable: true }] : []),
+      ...(includeBondingCurveV2 ? [{ pubkey: bondingCurveV2, isSigner: false, isWritable: false }] : []),
     ],
     data,
   });
@@ -244,7 +264,7 @@ async function buildPumpFunSell(connection, mint, userPubkey, tokenLamports, clo
   ];
 
   if (closeTokenAta) {
-    instructions.push(createCloseAccountInstruction(associatedUser, userPubkey, userPubkey));
+    instructions.push(createCloseAccountInstruction(associatedUser, userPubkey, userPubkey, [], tokenProgramId));
     console.log("[SELL] Adding instruction to close token account after sell");
   }
 
@@ -269,38 +289,65 @@ function derivePumpSwapPoolPDA(mint, quoteMint = WSOL_MINT, index = 0) {
   return poolPDA;
 }
 
-async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, closeTokenAta = false, slippage = 0.03, creatorPublicKey, closeWsolAta = true) {
+function derivePumpFunBondingCurveV2PDA(mint) {
+  const [bondingCurveV2] = PublicKey.findProgramAddressSync(
+    [Buffer.from("bonding-curve-v2"), mint.toBuffer()],
+    PUMPFUN_PROGRAM_ID
+  );
+  return bondingCurveV2;
+}
+
+function derivePumpSwapPoolV2PDA(mint) {
+  const [poolV2] = PublicKey.findProgramAddressSync(
+    [Buffer.from("pool-v2"), mint.toBuffer()],
+    PUMP_SWAP_PROGRAM_ID
+  );
+  return poolV2;
+}
+
+async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, closeTokenAta = false, slippage = 0.03, creatorPublicKey, closeWsolAta = true, isCashbackCoin = false) {
   const quoteMint = WSOL_MINT;
   const PUMP_SWAP_PROGRAM_ID_LOCAL = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
   const FEE_PROGRAM_ID_LOCAL       = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
-  const TOKEN_PROGRAM_ID_LOCAL     = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+  const QUOTE_TOKEN_PROGRAM_ID_LOCAL = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
   const ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+  const baseTokenProgramId = await getTokenProgramId(connection, mint);
 
   const pool = derivePumpSwapPoolPDA(mint, quoteMint, 0);
   const [globalConfig] = PublicKey.findProgramAddressSync([Buffer.from("global_config")], PUMP_SWAP_PROGRAM_ID_LOCAL);
 
-  const userBaseTokenAccount  = await getAssociatedTokenAddress(mint, userPubkey);
-  const userQuoteTokenAccount = await getAssociatedTokenAddress(quoteMint, userPubkey);
+  const userBaseTokenAccount = await getAssociatedTokenAddress(
+    mint, userPubkey, false, baseTokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+  );
+  const userQuoteTokenAccount = await getAssociatedTokenAddress(
+    quoteMint, userPubkey, false, QUOTE_TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+  );
 
   const instructions = [];
   if (!await connection.getAccountInfo(userQuoteTokenAccount)) {
     instructions.push(createAssociatedTokenAccountInstruction(
       userPubkey, userQuoteTokenAccount, userPubkey, quoteMint,
-      TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+      QUOTE_TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
     ));
   }
 
-  const poolBaseTokenAccount  = await getAssociatedTokenAddress(mint, pool, true);
-  const poolQuoteTokenAccount = await getAssociatedTokenAddress(quoteMint, pool, true);
+  const poolBaseTokenAccount = await getAssociatedTokenAddress(
+    mint, pool, true, baseTokenProgramId, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+  );
+  const poolQuoteTokenAccount = await getAssociatedTokenAddress(
+    quoteMint, pool, true, QUOTE_TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+  );
 
   const protocolFeeRecipient = new PublicKey("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV");
-  const protocolFeeRecipientTokenAccount = await getAssociatedTokenAddress(quoteMint, protocolFeeRecipient, true);
+  const protocolFeeRecipientTokenAccount = await getAssociatedTokenAddress(
+    quoteMint, protocolFeeRecipient, true, QUOTE_TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+  );
 
   const [coinCreatorVaultAuthority] = PublicKey.findProgramAddressSync(
     [Buffer.from("creator_vault"), creatorPublicKey.toBuffer()], PUMP_SWAP_PROGRAM_ID_LOCAL
   );
   const [coinCreatorVaultAta] = PublicKey.findProgramAddressSync(
-    [coinCreatorVaultAuthority.toBuffer(), TOKEN_PROGRAM_ID_LOCAL.toBuffer(), quoteMint.toBuffer()],
+    [coinCreatorVaultAuthority.toBuffer(), QUOTE_TOKEN_PROGRAM_ID_LOCAL.toBuffer(), quoteMint.toBuffer()],
     ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
   );
 
@@ -313,14 +360,18 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
   );
 
   const [eventAuthority] = PublicKey.findProgramAddressSync([Buffer.from("__event_authority")], PUMP_SWAP_PROGRAM_ID_LOCAL);
+  const poolV2 = derivePumpSwapPoolV2PDA(mint);
+  const includePoolV2 = await shouldIncludeV2Account(connection, poolV2);
 
   // Cashback remaining accounts
   const [userVolumeAccumulatorAmm] = PublicKey.findProgramAddressSync(
     [Buffer.from("user_volume_accumulator"), userPubkey.toBuffer()], PUMP_SWAP_PROGRAM_ID_LOCAL
   );
-  const cashbackUserVolumeAccumulatorWsolAta = await getAssociatedTokenAddress(
-    quoteMint, userVolumeAccumulatorAmm, true, TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
-  );
+  const cashbackUserVolumeAccumulatorWsolAta = isCashbackCoin
+    ? await getAssociatedTokenAddress(
+        quoteMint, userVolumeAccumulatorAmm, true, TOKEN_PROGRAM_ID_LOCAL, ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL
+      )
+    : null;
 
   const baseBalResp  = await connection.getTokenAccountBalance(poolBaseTokenAccount);
   const quoteBalResp = await connection.getTokenAccountBalance(poolQuoteTokenAccount);
@@ -358,8 +409,8 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
       { pubkey: poolQuoteTokenAccount,            isSigner: false, isWritable: true  },
       { pubkey: protocolFeeRecipient,             isSigner: false, isWritable: false },
       { pubkey: protocolFeeRecipientTokenAccount, isSigner: false, isWritable: true  },
-      { pubkey: TOKEN_PROGRAM_ID_LOCAL,           isSigner: false, isWritable: false },
-      { pubkey: TOKEN_PROGRAM_ID_LOCAL,           isSigner: false, isWritable: false },
+      { pubkey: baseTokenProgramId,               isSigner: false, isWritable: false },
+      { pubkey: QUOTE_TOKEN_PROGRAM_ID_LOCAL,     isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId,          isSigner: false, isWritable: false },
       { pubkey: ASSOCIATED_TOKEN_PROGRAM_ID_LOCAL,isSigner: false, isWritable: false },
       { pubkey: eventAuthority,                   isSigner: false, isWritable: false },
@@ -369,9 +420,12 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
       { pubkey: feeConfig,                        isSigner: false, isWritable: false },
       { pubkey: FEE_PROGRAM_ID_LOCAL,             isSigner: false, isWritable: false },
       // remaining_accounts[0]: WSOL ATA of userVolumeAccumulator (cashback)
-      { pubkey: cashbackUserVolumeAccumulatorWsolAta, isSigner: false, isWritable: true },
+      ...(isCashbackCoin && cashbackUserVolumeAccumulatorWsolAta
+        ? [{ pubkey: cashbackUserVolumeAccumulatorWsolAta, isSigner: false, isWritable: true }]
+        : []),
       // remaining_accounts[1]: userVolumeAccumulator for AMM program (cashback)
-      { pubkey: userVolumeAccumulatorAmm,         isSigner: false, isWritable: true  },
+      ...(isCashbackCoin ? [{ pubkey: userVolumeAccumulatorAmm, isSigner: false, isWritable: true }] : []),
+      ...(includePoolV2 ? [{ pubkey: poolV2, isSigner: false, isWritable: false }] : []),
     ],
     data
   });
@@ -383,12 +437,12 @@ async function buildPumpSwapSell(connection, mint, userPubkey, tokenLamports, cl
   );
 
   if (closeTokenAta) {
-    instructions.push(createCloseAccountInstruction(userBaseTokenAccount, userPubkey, userPubkey));
+    instructions.push(createCloseAccountInstruction(userBaseTokenAccount, userPubkey, userPubkey, [], baseTokenProgramId));
   }
   if (closeWsolAta) {
     instructions.push(
       createSyncNativeInstruction(userQuoteTokenAccount, TOKEN_PROGRAM_ID),
-      createCloseAccountInstruction(userQuoteTokenAccount, userPubkey, userPubkey, TOKEN_PROGRAM_ID)
+      createCloseAccountInstruction(userQuoteTokenAccount, userPubkey, userPubkey, [], QUOTE_TOKEN_PROGRAM_ID_LOCAL)
     );
   }
 

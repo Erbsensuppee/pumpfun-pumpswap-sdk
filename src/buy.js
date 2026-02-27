@@ -40,6 +40,10 @@ const PUMPFUN_BUY_USE_24B_COMPAT_ENCODING = true;
 // PUMPSWAP
 const PUMP_SWAP_PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 const WSOL_MINT            = new PublicKey('So11111111111111111111111111111111111111112');
+const V2_ACCOUNT_MODE_RAW = (process.env.PUMP_INCLUDE_V2_ACCOUNTS || "true").toLowerCase();
+const V2_ACCOUNT_MODE =
+  V2_ACCOUNT_MODE_RAW === "false" ? "off" :
+  "on";
 
 const FEE_SEED_CONST = new Uint8Array([
   1, 86, 224, 246, 147, 102, 90, 207, 68, 219,
@@ -63,6 +67,11 @@ function parseGlobalFeeRecipient(globalAccountData) {
     throw new Error("Invalid Global account data for fee_recipient");
   }
   return new PublicKey(globalAccountData.slice(feeRecipientOffset, feeRecipientOffset + 32));
+}
+
+async function shouldIncludeV2Account(connection, pda) {
+  if (V2_ACCOUNT_MODE === "off") return false;
+  return true;
 }
 
 /**
@@ -90,7 +99,7 @@ async function getLiveFeeBps(connection, feeConfigPda) {
       const total = protocolBps + creatorBps;
       if (total > 0n) {
         console.log(`[BUY] Live fee bps (feeConfig): protocol=${protocolBps}, creator=${creatorBps}, total=${total}`);
-        return total;
+        return { protocolBps, creatorBps, totalBps: total };
       }
     }
   } catch (err) {
@@ -107,13 +116,13 @@ async function getLiveFeeBps(connection, feeConfigPda) {
       const total = protocolBps + creatorBps;
       if (total > 0n) {
         console.log(`[BUY] Live fee bps (Global fallback): total=${total}`);
-        return total;
+        return { protocolBps, creatorBps, totalBps: total };
       }
     }
   } catch (_) {}
 
   console.warn("[BUY] getLiveFeeBps: using hard fallback 125n");
-  return 125n;
+  return { protocolBps: 95n, creatorBps: 30n, totalBps: 125n };
 }
 
 function ceilDiv(a, b) {
@@ -158,18 +167,38 @@ function applyTokenTransferFee(tokensOut, transferFeeInfo) {
   return { feeWithheld, tokensReceived };
 }
 
-function quoteTokensOutForSpendableSol(virtualTokenReserves, virtualSolReserves, spendableSolIn, totalFeeBps) {
+function quoteTokensOutForSpendableSol(virtualTokenReserves, virtualSolReserves, spendableSolIn, protocolFeeBps, creatorFeeBps) {
   if (spendableSolIn <= 0n) return 0n;
+  const totalFeeBps = protocolFeeBps + creatorFeeBps;
   // IDL formula step 1: net_sol = floor(spendable * 10000 / (10000 + totalFeeBps))
   let netSol = (spendableSolIn * 10000n) / (10000n + totalFeeBps);
   if (netSol <= 1n) return 0n;
   // IDL step 2+3: verify net_sol + fees <= spendable, adjust if not
-  const fees = ceilDiv(netSol * (totalFeeBps / 2n), 10000n) * 2n; // approximate split
+  const fees =
+    ceilDiv(netSol * protocolFeeBps, 10000n) +
+    ceilDiv(netSol * creatorFeeBps, 10000n);
   if (netSol + fees > spendableSolIn) netSol = netSol - (netSol + fees - spendableSolIn);
   if (netSol <= 1n) return 0n;
   // IDL step 4: tokens_out = floor((net_sol - 1) * vT / (vS + net_sol - 1))
   const effectiveNetSol = netSol - 1n;
   return (effectiveNetSol * virtualTokenReserves) / (virtualSolReserves + effectiveNetSol);
+}
+
+function findMaxTokensOutForSpendableSolBuy(virtualTokenReserves, virtualSolReserves, spendableSolBudget, totalFeeBps, maxTokenOutCap = null) {
+  if (spendableSolBudget <= 0n) return 0n;
+  let lo = 0n;
+  let hi = virtualTokenReserves > 0n ? virtualTokenReserves - 1n : 0n;
+  if (maxTokenOutCap !== null && hi > maxTokenOutCap) hi = maxTokenOutCap;
+  while (lo < hi) {
+    const mid = lo + (hi - lo + 1n) / 2n;
+    const spendable = quoteSpendableSolForTokens(virtualTokenReserves, virtualSolReserves, mid, totalFeeBps);
+    if (spendable !== null && spendable <= spendableSolBudget) {
+      lo = mid;
+    } else {
+      hi = mid - 1n;
+    }
+  }
+  return lo;
 }
 
 function quoteSpendableSolForTokens(virtualTokenReserves, virtualSolReserves, tokensOut, totalFeeBps) {
@@ -259,6 +288,8 @@ async function getBondingCurveReserves(connection, bondingCurve) {
     tokenTotalSupply:       data.readBigUInt64LE(40),
     bondingCurveIsComplete: data[48] === 1,
     creatorPublicKey:       new PublicKey(data.slice(49, 81)),
+    isMayhemMode:           data.length > 81 ? data[81] === 1 : false,
+    isCashbackCoin:         data.length > 82 ? data[82] === 1 : false,
   };
 }
 
@@ -282,7 +313,8 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
     virtualSolReserves,
     realTokenReserves,
     bondingCurveIsComplete,
-    creatorPublicKey
+    creatorPublicKey,
+    isCashbackCoin,
   } = await getBondingCurveReserves(connection, bondingCurve);
 
   switch (Number(bondingCurveIsComplete)) {
@@ -291,7 +323,7 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
       break;
     case PumpProgramType.PUMP_SWAP:
       console.log("[BUY] Bonding curve complete -> redirecting to PumpSwap buy path");
-      return await buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, slippage, creatorPublicKey);
+      return await buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, slippage, creatorPublicKey, trackVolume, isCashbackCoin);
     default:
       console.warn("[BUY] Unknown PumpProgramType, aborting buy");
       return;
@@ -300,6 +332,13 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
   // --- PDAs ---
   const [global]                  = PublicKey.findProgramAddressSync([Buffer.from("global")], PUMPFUN_PROGRAM_ID);
   const tokenProgramId            = await getTokenProgramId(connection, mint);
+  const effectiveMode =
+    mode === "buy" && tokenProgramId.equals(TOKEN_2022_PROGRAM_ID)
+      ? "buy_exact_sol_in"
+      : mode;
+  if (effectiveMode !== mode) {
+    console.log("[BUY] Token-2022 mint detected -> forcing buy_exact_sol_in for safer accounting");
+  }
   const [associatedBondingCurve]  = PublicKey.findProgramAddressSync(
     [bondingCurve.toBuffer(), tokenProgramId.toBuffer(), mint.toBuffer()], ASSOCIATED_TOKEN_PROGRAM_ID
   );
@@ -308,13 +347,15 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
   const [userVolumeAccumulator]   = PublicKey.findProgramAddressSync([Buffer.from("user_volume_accumulator"), userPubkey.toBuffer()], PUMPFUN_PROGRAM_ID);
   const [feeConfig]               = PublicKey.findProgramAddressSync([Buffer.from("fee_config"), FEE_SEED_CONST], FEE_PROGRAM_ID);
   const [creatorVault]            = PublicKey.findProgramAddressSync([Buffer.from("creator-vault"), creatorPublicKey.toBuffer()], PUMPFUN_PROGRAM_ID);
+  const bondingCurveV2            = derivePumpFunBondingCurveV2PDA(mint);
+  const includeBondingCurveV2     = await shouldIncludeV2Account(connection, bondingCurveV2);
 
   const globalAccountInfo = await connection.getAccountInfo(global);
   if (!globalAccountInfo?.data) throw new Error("Failed to fetch Global account data");
   const feeRecipient = parseGlobalFeeRecipient(globalAccountInfo.data);
 
   // --- Live fee bps: read directly from feeConfig account (avoids simulation blockhash issues) ---
-  const totalFeeBps = await getLiveFeeBps(connection, feeConfig);
+  const { protocolBps, creatorBps, totalBps: totalFeeBps } = await getLiveFeeBps(connection, feeConfig);
   console.log("[BUY] Total fee bps:", totalFeeBps.toString());
 
   // --- ATA: idempotent create ---
@@ -331,18 +372,15 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
   // --- Quotes ---
   const solIn = BigInt(lamportsAmount);
   const tokenOutQuoted = quoteTokensOutForSpendableSol(
-    virtualTokenReserves, virtualSolReserves, solIn, totalFeeBps
+    virtualTokenReserves, virtualSolReserves, solIn, protocolBps, creatorBps
   );
   const tokenOutQuotedCapped = tokenOutQuoted > realTokenReserves ? realTokenReserves : tokenOutQuoted;
 
-  // Legacy `buy(amount, max_sol_cost)` takes token amount, but fees are still charged on SOL.
-  // If we binary-search against the full SOL budget here, we over-request tokens and can trip
-  // post-transfer accounting overflows on some curves. Reserve a fee budget first.
-  const legacyCurveSolBudget = (solIn * 10000n) / (10000n + totalFeeBps);
-  const tokenOutForBuyRaw = findMaxTokensOutForGrossSolBuy(
+  const tokenOutForBuyRaw = findMaxTokensOutForSpendableSolBuy(
     virtualTokenReserves,
     virtualSolReserves,
-    legacyCurveSolBudget > 0n ? legacyCurveSolBudget : 0n,
+    solIn,
+    totalFeeBps,
     realTokenReserves
   );
   // Keep legacy buy quote conservative relative to the exact-sol quote path.
@@ -353,23 +391,26 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
     : 0;
 
   console.log("[BUY] Expected token output:", tokenOutQuotedCapped.toString(), "lamports");
-  if (mode === "buy") {
-    console.log("[BUY] Legacy buy curve budget (pre-fee):", legacyCurveSolBudget.toString(), "lamports");
+  if (effectiveMode === "buy") {
+    const legacyQuotedSpendable = quoteSpendableSolForTokens(
+      virtualTokenReserves,
+      virtualSolReserves,
+      tokenOutForBuy,
+      totalFeeBps
+    );
+    console.log("[BUY] Legacy buy quoted spendable SOL:", (legacyQuotedSpendable ?? 0n).toString(), "lamports");
     console.log("[BUY] Legacy buy token amount (pre-slippage):", tokenOutForBuy.toString(), "lamports");
   }
   console.log("[BUY] Estimated token price:", tokenPriceInNative, "priceInNative");
 
   const slippageBps = BigInt(Math.floor(slippage * 10000));
   const conservativeTokenOut = tokenOutForBuy * (10000n - slippageBps) / 10000n;
-  // Legacy `buy(amount, max_sol_cost)` validates against the SOL required for the requested
-  // token amount plus fees. Gross up the quoted curve cost by fee bps first, then add slippage.
-  const grossSolForTokens =
-    quoteGrossSolCostForTokens(virtualTokenReserves, virtualSolReserves, conservativeTokenOut) ?? solIn;
-  const maxSolCostNoSlip = ceilDiv(grossSolForTokens * (10000n + totalFeeBps), 10000n);
-  const maxSolCost = ceilDiv(maxSolCostNoSlip * (10000n + slippageBps), 10000n);
+  const spendableForTokens =
+    quoteSpendableSolForTokens(virtualTokenReserves, virtualSolReserves, conservativeTokenOut, totalFeeBps) ?? solIn;
+  const maxSolCost = ceilDiv(spendableForTokens * (10000n + slippageBps), 10000n);
   let minTokensOutBase = tokenOutQuotedCapped;
 
-  if (mode === "buy_exact_sol_in") {
+  if (effectiveMode === "buy_exact_sol_in") {
     const transferFeeInfo = await getToken2022TransferFeeInfo(connection, mint, tokenProgramId);
     if (transferFeeInfo) {
       const { feeWithheld, tokensReceived } = applyTokenTransferFee(tokenOutQuotedCapped, transferFeeInfo);
@@ -388,7 +429,7 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
   // Keep 24-byte compat only when enabled and trackVolume is not explicitly disabled.
   const use24ByteEncoding = PUMPFUN_BUY_USE_24B_COMPAT_ENCODING && trackVolume !== false;
   const data = Buffer.alloc(use24ByteEncoding ? 24 : 26);
-  if (mode === "buy_exact_sol_in") {
+  if (effectiveMode === "buy_exact_sol_in") {
     BUY_EXACT_SOL_IN_DISCRIMINATOR.copy(data, 0);
     data.writeBigUInt64LE(solIn, 8);          // spendable_sol_in
     data.writeBigUInt64LE(minTokensOut, 16);  // min_tokens_out
@@ -420,12 +461,13 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
       { pubkey: userVolumeAccumulator,   isSigner: false, isWritable: true  },
       { pubkey: feeConfig,               isSigner: false, isWritable: false },
       { pubkey: FEE_PROGRAM_ID,          isSigner: false, isWritable: false },
+      ...(includeBondingCurveV2 ? [{ pubkey: bondingCurveV2, isSigner: false, isWritable: false }] : []),
     ],
     data,
   });
 
   const instructions = [
-    ComputeBudgetProgram.setComputeUnitLimit({ units: 300_000 }),
+    ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
     ...(ataCreateIx ? [ataCreateIx] : []),
     buyIx,
@@ -433,7 +475,7 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
 
   return {
     instructions,
-    tokenAmount: mode === "buy_exact_sol_in" ? minTokensOut : conservativeTokenOut,
+    tokenAmount: effectiveMode === "buy_exact_sol_in" ? minTokensOut : conservativeTokenOut,
     tokenPrice:  tokenPriceInNative,
   };
 }
@@ -459,7 +501,23 @@ function derivePumpSwapPoolPDA(mint, quoteMint = WSOL_MINT, index = 0) {
   return poolPDA;
 }
 
-async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, slippage = 0.03, creatorPublicKey, trackVolume = true) {
+function derivePumpFunBondingCurveV2PDA(mint) {
+  const [bondingCurveV2] = PublicKey.findProgramAddressSync(
+    [Buffer.from("bonding-curve-v2"), mint.toBuffer()],
+    PUMPFUN_PROGRAM_ID
+  );
+  return bondingCurveV2;
+}
+
+function derivePumpSwapPoolV2PDA(mint) {
+  const [poolV2] = PublicKey.findProgramAddressSync(
+    [Buffer.from("pool-v2"), mint.toBuffer()],
+    PUMP_SWAP_PROGRAM_ID
+  );
+  return poolV2;
+}
+
+async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, slippage = 0.03, creatorPublicKey, trackVolume = true, isCashbackCoin = false) {
   const quoteMint = WSOL_MINT;
   const PUMP_SWAP_PROGRAM_ID_LOCAL        = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
   const FEE_PROGRAM_ID_LOCAL              = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
@@ -510,11 +568,15 @@ async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, sl
   const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from("global_volume_accumulator")], PUMP_SWAP_PROGRAM_ID_LOCAL);
   const [userVolumeAccumulator]   = PublicKey.findProgramAddressSync([Buffer.from("user_volume_accumulator"), userPubkey.toBuffer()], PUMP_SWAP_PROGRAM_ID_LOCAL);
 
-  const cashbackUserVolumeAccumulatorWsolAta = await getAssociatedTokenAddress(
-    quoteMint, userVolumeAccumulator, true, QUOTE_TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
-  );
+  const cashbackUserVolumeAccumulatorWsolAta = isCashbackCoin
+    ? await getAssociatedTokenAddress(
+        quoteMint, userVolumeAccumulator, true, QUOTE_TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID
+      )
+    : null;
 
   const [eventAuthority] = PublicKey.findProgramAddressSync([Buffer.from("__event_authority")], PUMP_SWAP_PROGRAM_ID_LOCAL);
+  const poolV2 = derivePumpSwapPoolV2PDA(mint);
+  const includePoolV2 = await shouldIncludeV2Account(connection, poolV2);
 
   const baseBalResp  = await connection.getTokenAccountBalance(poolBaseTokenAccount);
   const quoteBalResp = await connection.getTokenAccountBalance(poolQuoteTokenAccount);
@@ -584,7 +646,10 @@ async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, sl
       { pubkey: userVolumeAccumulator,            isSigner: false, isWritable: true  },
       { pubkey: feeConfig,                        isSigner: false, isWritable: false },
       { pubkey: FEE_PROGRAM_ID_LOCAL,             isSigner: false, isWritable: false },
-      { pubkey: cashbackUserVolumeAccumulatorWsolAta, isSigner: false, isWritable: true },
+      ...(isCashbackCoin && cashbackUserVolumeAccumulatorWsolAta
+        ? [{ pubkey: cashbackUserVolumeAccumulatorWsolAta, isSigner: false, isWritable: true }]
+        : []),
+      ...(includePoolV2 ? [{ pubkey: poolV2, isSigner: false, isWritable: false }] : []),
     ],
     data
   });

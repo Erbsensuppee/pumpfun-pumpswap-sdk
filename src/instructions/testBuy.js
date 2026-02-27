@@ -42,6 +42,49 @@ function logPumpBuyIxDebug(instructions) {
   console.log(`[BUY TEST] Pump ix accounts=${pumpIx.keys.length} dataLen=${pumpIx.data.length}`);
 }
 
+async function tryOverflowBackoffRetries({
+  connection,
+  wallet,
+  exactSolBuilder,
+  mint,
+  lamportsToBuy,
+  slippage,
+  pumpfunBuyRemainingAccount,
+  pumpfunBuyRemainingAccountWritable,
+}) {
+  const backoffPercents = [90, 75, 50, 25];
+  for (const pct of backoffPercents) {
+    const reducedLamports = Math.max(1, Math.floor(lamportsToBuy * pct / 100));
+    console.log(`[BUY TEST] Overflow backoff retry: ${pct}% budget (${reducedLamports} lamports)`);
+    try {
+      const { instructions } = await exactSolBuilder(
+        connection,
+        mint,
+        wallet,
+        reducedLamports,
+        slippage,
+        false
+      );
+      appendPumpBuyRemainingAccount(
+        instructions,
+        pumpfunBuyRemainingAccount,
+        pumpfunBuyRemainingAccountWritable
+      );
+      logPumpBuyIxDebug(instructions);
+      const tx = new Transaction().add(...instructions);
+      const sig = await sendAndConfirmTransaction(connection, tx, [wallet]);
+      console.log(`Buy confirmed (overflow backoff ${pct}%): https://solscan.io/tx/${sig}`);
+      return true;
+    } catch (retryErr) {
+      if (!isPumpOverflowError(retryErr)) {
+        throw retryErr;
+      }
+      console.log(`[BUY TEST] Still overflow at ${pct}% budget, trying lower...`);
+    }
+  }
+  return false;
+}
+
 (async () => {
     try {
         // --- Load env values
@@ -60,7 +103,7 @@ function logPumpBuyIxDebug(instructions) {
         const wallet = Keypair.fromSecretKey(bs58Decode(privateKeyBase58));
         console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
         // --- Token to buy
-        const mint = new PublicKey("3WaDEAD8oFehQUHLiap7R6WSgoMguoyKA3evtUgcpump");
+        const mint = new PublicKey("CzMcB9NPLh7cWNncHnwawacogB78s5DGUiCZubx3pump");
 
         const solToBuy = 0.001; // Adjust based on decimals (1e6 = 1 token if 6 decimals)
         const lamportsToBuy = solToBuy * LAMPORTS_PER_SOL;
@@ -68,6 +111,7 @@ function logPumpBuyIxDebug(instructions) {
         const buyMode = process.env.BUY_MODE || "buy";
         const trackVolume = (process.env.TRACK_VOLUME || "true").toLowerCase() !== "false";
         const allowExactSolFallback = (process.env.BUY_FALLBACK_EXACT_SOL_IN || "false").toLowerCase() === "true";
+        const allowOverflowBackoff = (process.env.BUY_OVERFLOW_BACKOFF || "true").toLowerCase() !== "false";
         const pumpfunBuyRemainingAccount = process.env.PUMPFUN_BUY_REMAINING_ACCOUNT;
         const pumpfunBuyRemainingAccountWritable =
           (process.env.PUMPFUN_BUY_REMAINING_ACCOUNT_WRITABLE || "false").toLowerCase() === "true";
@@ -86,6 +130,7 @@ function logPumpBuyIxDebug(instructions) {
           console.log(`Using buy mode: ${buyMode}`);
           console.log(`Track volume: ${trackVolume}`);
           console.log(`Allow exact-sol fallback: ${allowExactSolFallback}`);
+          console.log(`Allow overflow backoff retries: ${allowOverflowBackoff}`);
           if (pumpfunBuyRemainingAccount) {
             console.log(`Pump buy extra remaining account: ${pumpfunBuyRemainingAccount}`);
             console.log(`Pump buy extra remaining account writable: ${pumpfunBuyRemainingAccountWritable}`);
@@ -125,6 +170,20 @@ function logPumpBuyIxDebug(instructions) {
                 const retryTx = new Transaction().add(...retryInstructions);
                 const retrySig = await sendAndConfirmTransaction(connection, retryTx, [wallet]);
                 console.log(`Buy confirmed (buy_exact_sol_in fallback): https://solscan.io/tx/${retrySig}`);
+              } else if (allowOverflowBackoff && isPumpOverflowError(err)) {
+                const recovered = await tryOverflowBackoffRetries({
+                  connection,
+                  wallet,
+                  exactSolBuilder,
+                  mint,
+                  lamportsToBuy,
+                  slippage,
+                  pumpfunBuyRemainingAccount,
+                  pumpfunBuyRemainingAccountWritable,
+                });
+                if (!recovered) {
+                  console.error("Error sending buy transaction (overflow persisted after backoff retries):", err);
+                }
               } else {
                 console.error("Error sending buy transaction:", err);
               }
