@@ -1,8 +1,6 @@
 # PumpFun-PumpSwap SDK
 
-**npm • License: MIT**
-
-[![npm](https://img.shields.io/npm/v/pumpfun-pumpswap-sdk?style=flat-square)](https://www.npmjs.com/package/pumpfun-pumpswap-sdk) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 This is a Node.js SDK for building buy, sell, and cashback-claim transactions on [Pump.fun](https://pump.fun) and [PumpSwap](https://pumpswap.fun) (Solana). It automatically detects whether a mint is still on the bonding curve and switches to PumpSwap when migrated. The SDK uses manual transaction instructions (no Anchor runtime dependency) and supports slippage, retries, Token-2022 mints, and cashback account flows.
 
