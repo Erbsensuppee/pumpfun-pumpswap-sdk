@@ -294,10 +294,10 @@ async function getBondingCurveReserves(connection, bondingCurve) {
 }
 
 // ---------------------------------------------------------------------------
-// buildPumpFunBuy  –  uses buy_exact_sol_in by default
+// buildPumpFunBuy
 // ---------------------------------------------------------------------------
 
-async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, slippage = 0.03, mode = "buy_exact_sol_in", trackVolume = true) {
+async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, slippage = 0.03, mode = "buy", trackVolume = true) {
   console.log(
     '[buildPumpFunBuy types]',
     typeof connection, typeof mint, typeof userKeypair, typeof lamportsAmount, typeof slippage,
@@ -332,13 +332,7 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
   // --- PDAs ---
   const [global]                  = PublicKey.findProgramAddressSync([Buffer.from("global")], PUMPFUN_PROGRAM_ID);
   const tokenProgramId            = await getTokenProgramId(connection, mint);
-  const effectiveMode =
-    mode === "buy" && tokenProgramId.equals(TOKEN_2022_PROGRAM_ID)
-      ? "buy_exact_sol_in"
-      : mode;
-  if (effectiveMode !== mode) {
-    console.log("[BUY] Token-2022 mint detected -> forcing buy_exact_sol_in for safer accounting");
-  }
+  const effectiveMode = mode === "buy_exact_sol_in" ? "buy_exact_sol_in" : "buy";
   const [associatedBondingCurve]  = PublicKey.findProgramAddressSync(
     [bondingCurve.toBuffer(), tokenProgramId.toBuffer(), mint.toBuffer()], ASSOCIATED_TOKEN_PROGRAM_ID
   );

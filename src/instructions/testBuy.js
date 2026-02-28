@@ -103,7 +103,7 @@ async function tryOverflowBackoffRetries({
         const wallet = Keypair.fromSecretKey(bs58Decode(privateKeyBase58));
         console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
         // --- Token to buy
-        const mint = new PublicKey("BxPkRK7ZZZsm4r6TCdBf2W4j85BktAzL8GD4oKfypump");
+        const mint = new PublicKey("AiY9tSkqAb8gM1JWC9tzXNsykdvSqS64yF3MNMTxpump");
 
         const solToBuy = 0.001; // Adjust based on decimals (1e6 = 1 token if 6 decimals)
         const lamportsToBuy = solToBuy * LAMPORTS_PER_SOL;

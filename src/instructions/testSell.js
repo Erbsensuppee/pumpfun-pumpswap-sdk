@@ -43,7 +43,7 @@ dotenv.config();
     console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
 
     // --- Token + amount setup
-    const tokenMint = new PublicKey("BxPkRK7ZZZsm4r6TCdBf2W4j85BktAzL8GD4oKfypump"); // replace this
+    const tokenMint = new PublicKey("AiY9tSkqAb8gM1JWC9tzXNsykdvSqS64yF3MNMTxpump"); // replace this
     const mintInfo = await connection.getAccountInfo(tokenMint, "confirmed");
     if (!mintInfo?.owner) {
       throw new Error(`Mint account not found: ${tokenMint.toBase58()}`);
