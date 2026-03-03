@@ -143,6 +143,77 @@ function toBigIntSafe(value) {
   return 0n;
 }
 
+function parseFeeBpsFromEnv(envKey) {
+  const raw = process.env[envKey];
+  if (raw === undefined || raw.trim() === "") return 0n;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > 10000) {
+    console.warn(`[FEE] Invalid ${envKey}="${raw}". Expected 0..10000 (bps). Fee disabled.`);
+    return 0n;
+  }
+  return BigInt(Math.floor(parsed));
+}
+
+function parseFeeWalletFromEnv(envKey) {
+  const raw = process.env[envKey];
+  if (!raw || raw.trim() === "") return null;
+  try {
+    return new PublicKey(raw.trim());
+  } catch (_) {
+    console.warn(`[FEE] Invalid ${envKey}="${raw}". Fee disabled.`);
+    return null;
+  }
+}
+
+function toSafeLamportsNumber(lamports) {
+  if (lamports > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`[FEE] Lamports exceed MAX_SAFE_INTEGER: ${lamports.toString()}`);
+  }
+  return Number(lamports);
+}
+
+async function buildFeeTransferInstruction(connection, payer, baseLamports, bpsEnvKey, walletEnvKey, label) {
+  const feeBps = parseFeeBpsFromEnv(bpsEnvKey);
+  if (feeBps <= 0n) return null;
+  const feeWallet = parseFeeWalletFromEnv(walletEnvKey);
+  if (!feeWallet) {
+    console.warn(`[FEE] ${label} fee enabled but ${walletEnvKey} is missing/invalid. Fee skipped.`);
+    return null;
+  }
+
+  const feeLamports = (baseLamports * feeBps) / 10000n;
+  if (feeLamports <= 0n) return null;
+
+  const feeWalletInfo = await connection.getAccountInfo(feeWallet);
+  if (!feeWalletInfo) {
+    if (!PublicKey.isOnCurve(feeWallet.toBytes())) {
+      throw new Error(
+        `[FEE] ${label} fee wallet ${feeWallet.toBase58()} does not exist and is off-curve. ` +
+        `Use an existing funded wallet address.`
+      );
+    }
+
+    const rentExemptMin = await connection.getMinimumBalanceForRentExemption(0);
+    if (feeLamports < BigInt(rentExemptMin)) {
+      throw new Error(
+        `[FEE] ${label} fee wallet ${feeWallet.toBase58()} has no on-chain account. ` +
+        `First incoming transfer must be >= ${rentExemptMin} lamports for rent exemption, ` +
+        `but computed fee is ${feeLamports.toString()} lamports. ` +
+        `Fund this wallet once, then retry.`
+      );
+    }
+  }
+
+  console.log(
+    `[FEE] ${label}: ${feeLamports.toString()} lamports (${feeBps.toString()} bps) -> ${feeWallet.toBase58()}`
+  );
+  return SystemProgram.transfer({
+    fromPubkey: payer,
+    toPubkey: feeWallet,
+    lamports: toSafeLamportsNumber(feeLamports),
+  });
+}
+
 async function getToken2022TransferFeeInfo(connection, mint, tokenProgramId) {
   if (!tokenProgramId.equals(TOKEN_2022_PROGRAM_ID)) return null;
   try {
@@ -460,11 +531,21 @@ async function buildPumpFunBuy(connection, mint, userKeypair, lamportsAmount, sl
     data,
   });
 
+  const buyFeeIx = await buildFeeTransferInstruction(
+    connection,
+    userPubkey,
+    solIn,
+    "TRADE_BUY_FEE_BPS",
+    "TRADE_BUY_FEE_WALLET",
+    "buy"
+  );
+
   const instructions = [
     ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
     ...(ataCreateIx ? [ataCreateIx] : []),
     buyIx,
+    ...(buyFeeIx ? [buyFeeIx] : []),
   ];
 
   return {
@@ -648,10 +729,20 @@ async function buildPumpSwapBuy(connection, mint, userPubkey, lamportsAmount, sl
     data
   });
 
+  const buyFeeIx = await buildFeeTransferInstruction(
+    connection,
+    userPubkey,
+    BigInt(lamportsAmount),
+    "TRADE_BUY_FEE_BPS",
+    "TRADE_BUY_FEE_WALLET",
+    "buy"
+  );
+
   instructions.push(
     ComputeBudgetProgram.setComputeUnitLimit({ units: 500_000 }),
     ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 100_000 }),
-    buyIx
+    buyIx,
+    ...(buyFeeIx ? [buyFeeIx] : [])
   );
 
   return { instructions, tokenAmount: tokenOut, tokenPrice: tokenPriceInNative };

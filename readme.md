@@ -9,6 +9,7 @@ Key features:
 - **Cashback Support**: Supports `claim_cashback` for Pump.fun and PumpSwap.
 - **Token-2022 Aware**: Correct ATA derivation and instruction account handling for Token-2022 mints.
 - **V2 Account Layout Support**: Optional trailing `bonding_curve_v2` / `pool_v2` accounts for upgraded program layouts.
+- **Optional Custom Trade Fee**: You can add an extra buy/sell SOL fee transfer to your own wallet in the same transaction.
 - **Test Scripts**: Ready-to-run scripts for buy, sell, and cashback claims.
 
 **Note**: This SDK interacts with mainnet Solana programs. Always test with small amounts first.
@@ -39,6 +40,13 @@ Key features:
    BUY_MODE=buy
    TRACK_VOLUME=true
    BUY_FALLBACK_EXACT_SOL_IN=false
+
+   # Optional custom trade fee (disabled by default with 0 bps)
+   # 100 bps = 1%
+   TRADE_BUY_FEE_BPS=0
+   TRADE_BUY_FEE_WALLET=your_fee_wallet
+   TRADE_SELL_FEE_BPS=0
+   TRADE_SELL_FEE_WALLET=your_fee_wallet
 
    # Program layout compatibility
    # true  -> always include v2 trailing accounts (recommended/default)
@@ -177,6 +185,26 @@ Trailing accounts:
 - PumpSwap: `pool_v2` (`pool-v2`, mint)
 
 Use `false` only if you explicitly target an older layout.
+
+## Optional Custom Trade Fee
+
+By default, no custom fee is charged (`TRADE_BUY_FEE_BPS=0`, `TRADE_SELL_FEE_BPS=0`).
+
+When enabled:
+- Buy: sends an extra fee transfer from the trader wallet to `TRADE_BUY_FEE_WALLET`.
+- Sell: sends a fee transfer from sell proceeds to `TRADE_SELL_FEE_WALLET`.
+
+For 1% set:
+
+```env
+TRADE_BUY_FEE_BPS=100
+TRADE_SELL_FEE_BPS=100
+```
+
+Important initialization note:
+- The fee target wallet must already exist as an on-chain System account.
+- If it is a fresh address, fund it once first (rent-exempt minimum for 0-byte system account, currently ~`890880` lamports on mainnet) before using fee-enabled trades.
+- Otherwise small fees (for example 1% of `0.001 SOL`) can fail because the first transfer is below rent-exempt minimum.
 
 ## Examples / Test Scripts
 
